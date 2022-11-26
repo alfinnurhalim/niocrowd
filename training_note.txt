@@ -1,0 +1,19 @@
+Dataset structures:
+
+DATA_ROOT/
+        |->train/
+        |    |->img_001.jpg/
+        |    |->img_001.txt/
+        |    |->...
+        |->eval/
+        |    |->img_999.jpg/
+        |    |->img_999.txt/
+        |    |->...
+
+Annotations format
+
+For the annotations of each image, we use a single txt file which contains one annotation per line. Note that indexing for pixel values starts at 0. The expected format of each line is:
+
+x1 y1
+x2 y2
+x3 y3
