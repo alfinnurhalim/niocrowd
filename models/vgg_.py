@@ -6,6 +6,7 @@ import wget
 import torch
 import torch.nn as nn
 
+import urllib.request
 
 __all__ = [
     'VGG', 'vgg11', 'vgg11_bn', 'vgg13', 'vgg13_bn', 'vgg16', 'vgg16_bn',
@@ -107,12 +108,17 @@ def _vgg(arch, cfg, batch_norm, pretrained, progress, sync=False, **kwargs):
         kwargs['init_weights'] = False
     model = VGG(make_layers(cfgs[cfg], batch_norm=batch_norm, sync=sync), **kwargs)
     if pretrained:
-        checkpoint_dir = '../checkpoints'
-        if os.path.join(checkpoint_dir, model_names[arch]):
-            checkpoint = wget.download(model_urls[arch], out=checkpoint_dir)
-            state_dict = torch.load(os.path.join(checkpoint_dir, model_names[arch]))
-        else:
-            state_dict = torch.load(os.path.join(checkpoint_dir, model_names[arch]))
+        checkpoint_dir = './checkpoints'
+
+        if not os.path.exists(os.path.join(checkpoint_dir)):
+            os.makedirs(checkpoint_dir)
+
+        checkpoint_path = os.path.join(checkpoint_dir, model_names[arch])
+
+        if not os.path.exists(checkpoint_path):
+            wget.download(model_urls[arch], checkpoint_path)
+
+        state_dict = torch.load(os.path.join(checkpoint_dir, model_names[arch]))
         model.load_state_dict(state_dict)
     return model
 
