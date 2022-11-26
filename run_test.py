@@ -1,5 +1,6 @@
 import argparse
 
+from tqdm import tqdm,trange
 import torch
 import torchvision.transforms as standard_transforms
 import numpy as np
@@ -43,24 +44,27 @@ def get_args_parser():
 
     return parser
 
-def prediction_text(img, point, predict_cnt):
+def draw_text(img, predict_cnt):
+
+    h,w,_ = img.shape
+
     # font
     font = cv2.FONT_HERSHEY_SIMPLEX
 
     # point
-    point = (int(point[0]), int(point[1]))
+    point = (int(w*0.01),int(h*0.08))
 
     # fontScale
-    fontScale = 1
+    fontScale = 1.5 * (w/h)/(1280/720)
 
     # Blue color in BGR
-    color = (255, 0, 0)
+    color = (0, 255, 0)
 
     # Line thickness of 2 px
     thickness = 2
 
     # Using cv2.putText() method
-    text = 'Estimated Crowd: ' + str(predict_cnt)
+    text = 'Crowd: ' + str(predict_cnt)
     return cv2.putText(img, text, point , font, fontScale, color, thickness, cv2.LINE_AA)
 
 def preprocess_img(device, img):
@@ -104,7 +108,7 @@ def decode_output(outputs,threshold,img):
     return list_x,list_y
 
 def get_density_map(list_x,list_y,img):
-    h,_,_ = img.shape
+    h,w,_ = img.shape
 
     # invert Y axis
     list_y = [h-y for y in list_y]
@@ -113,31 +117,70 @@ def get_density_map(list_x,list_y,img):
     y = np.array(list_y)
 
     k = gaussian_kde(np.vstack([x, y]))
-    xi, yi = np.mgrid[x.min():x.max():x.size**0.7*1j,y.min():y.max():y.size**0.7*1j]
+    xi, yi = np.mgrid[0:w:x.size**0.7*1j,0:w:y.size**0.7*1j]
     zi = k(np.vstack([xi.flatten(), yi.flatten()])).reshape(xi.shape)
 
     return xi,yi,zi
 
-def video_circling(model, transform, device, vid_path, out_dir):
-    cap = cv2.VideoCapture(vid_path)
-    vid_name = os.path.join(out_dir, vid_path.split('/')[-1])
-    # Default resolutions of the frame are obtained.The default resolutions are system dependent.
-    # We convert the resolutions from float to integer.
-    frame_width = int(cap.get(3)) // 128 * 128
-    frame_height = int(cap.get(4)) // 128 * 128
-    # Define the codec and create VideoWriter object.The output is stored in 'outpy.avi' file.
-    out = cv2.VideoWriter(vid_name,cv2.VideoWriter_fourcc('M','J','P','G'), 10, (frame_width,frame_height))
+def get_heatmap(x,y,img,dpi=100,alpha=0.6):
+    h,w,_ = img.shape
 
-    while(True):
-        ret, frame = cap.read()
-        if ret == True:
-            frame_to_draw = circling(model, transform, device, False, frame)
-            # Write the frame into the file 'output.avi'
-            out.write(frame_to_draw)
-        else:
-            break
-    cap.release()
-    out.release()
+    xi,yi,zi = get_density_map(x,y,img)
+
+    # plt.figure(figsize=(w/dpi, h/dpi),dpi=dpi)
+    plt.contourf(xi, yi, zi, alpha=alpha)
+    plt.imshow(img,extent=[0,w,0,h])
+    plt.axis('off')
+
+    figure = plt.gcf()
+    figure.canvas.draw()
+
+    b = figure.axes[0].get_window_extent()
+
+    heatmap = np.array(figure.canvas.buffer_rgba())
+    # heatmap = heatmap[min(y):max(y),min(x):max(x),:]
+    heatmap = heatmap[int(b.y0):int(b.y1),int(b.x0):int(b.x1),:]
+
+    heatmap_h,heatmap_w,_ = heatmap.shape
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_RGBA2BGRA)
+    heatmap = cv2.resize(heatmap,(w,h))
+
+    plt.close()
+
+    return heatmap[:,:,:-1]
+
+def process(img,model,threshold,device='cuda',stack=False):
+    output = dict()
+
+    # convert RGB
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    # preproces image 
+    img_input = preprocess_img(device, img_rgb)
+
+    # Run Inference
+    outputs = model(img_input)
+
+    # Decode
+    x,y = decode_output(outputs,threshold,img)
+    heatmap = get_heatmap(x,y,img)
+
+    # draw
+    img_dot = img.copy()
+    for p in zip(x,y):
+        img_dot = cv2.circle(img_dot, (int(p[0]), int(p[1])), 3, (255, 0, 0), -1)
+    img_dot = draw_text(img_dot,len(x))
+
+    # set output
+    output['dot'] = img_dot
+    output['heatmap'] = heatmap
+
+    if stack:
+        canvas = np.hstack((img,img_dot, heatmap))
+        output['stack'] = canvas
+
+    return output
+
 
 def main(args, debug=False):
     print(args)
@@ -161,50 +204,41 @@ def main(args, debug=False):
 
     # set your image path here
     input_path = args.input_path
+    output_dir = args.output_dir
+
+    stack = True
 
     # read img
-    img_raw = cv2.imread(input_path)
-    img_rgb = cv2.cvtColor(img_raw, cv2.COLOR_BGR2RGB)
+    if os.path.splitext(input_path)[1] in img_ext:
+    
+        img = cv2.imread(input_path)
+        output = process(img,model,args.thr,device,stack=stack)
+        cv2.imwrite(os.path.join(output_dir, 'output.jpg'), output['stack'])
 
-    # preproces image 
-    img_input = preprocess_img(device, img_rgb)
+    # read video
+    elif os.path.splitext(input_path)[1] in vid_ext:
+        cap = cv2.VideoCapture(input_path)
+        vid_name = os.path.splitext(os.path.basename(input_path))[0]
+        output_path = os.path.join(output_dir,vid_name+'_output.mp4')
 
-    # Run Inference
-    outputs = model(img_input)
+        fps = int(cap.get(5))
+        length = int(cap.get(7))
 
-    # Decode
-    x,y = decode_output(outputs,args.thr,img_raw)
+        for i in trange(50):
+            ret, frame = cap.read()
 
-    # draw
-    canvas = img_raw.copy()
+            if ret:
+                output = process(frame,model,args.thr,device,stack=stack)
 
-    for p in zip(x,y):
-        canvas = cv2.circle(canvas, (int(p[0]), int(p[1])), 2, (0, 0, 255), -1)
+                if i==0 :
+                    task = 'stack' if stack else 'heatmap'
+                    frame_height,frame_width,_ = output[task].shape
+                    out = cv2.VideoWriter(output_path,cv2.VideoWriter_fourcc('M','J','P','G'), fps, (frame_width,frame_height))
 
-    cv2.imshow('sds',canvas)
-    cv2.waitKey(0)
+                out.write(output[task])
 
-    xi,yi,zi = get_density_map(x,y,img_raw)
-
-    plt.contourf(xi, yi, zi, alpha=0.5)
-
-    plt.imshow(img_rgb, extent=[min(x),max(x),min(y),max(y)])
-    plt.show()
-
-    # if folder
-    # if os.path.isdir(input_path):
-    #     for idx, img in enumerate(os.listdir(input_path)):
-    #         img = os.path.join(input_path, img)
-    #         img_to_draw = circling(model, transform, device, img)
-    #         cv2.imwrite(os.path.join(args.output_dir, 'output_{}.jpg'.format(idx)), img_to_draw)
-
-    # # if single img or video
-    # else:
-    #     if os.path.splitext(input_path)[1] in img_ext:
-    #         img_to_draw = circling(model, transform, device, input_path)
-    #         cv2.imwrite(os.path.join(args.output_dir, 'output.jpg'), img_to_draw)
-    #     elif os.path.splitext(input_path)[1] in vid_ext:
-    #         video_circling(model, transform, device, input_path, args.output_dir)
+        cap.release()
+        out.release()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('P2PNet evaluation script', parents=[get_args_parser()])
